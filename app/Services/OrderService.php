@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Order;
 use App\Models\Transaction;
+use App\Models\User;
 use Illuminate\Support\Facades\DB;
 
 
@@ -14,12 +15,27 @@ readonly class OrderService
         DB::beginTransaction();
 
         try {
-            $order = Order::create([
-                'user_id' => auth()->id(),
-                'type' => $params['type'],
-                'amount' => $params['amount'],
-                'price' => $params['price'],
-            ]);
+            $user = User::findOrFail($params['user_id']);
+
+            if ($params['type'] === 'buy') {
+                $totalCost = $params['amount'] * $params['price'];
+
+                if ($user->balance < $totalCost) {
+                    throw new \Exception('موجودی ریالی شما کافی نیست.');
+                }
+
+                $user->balance -= $totalCost;
+            } elseif ($params['type'] === 'sell') {
+                if ($user->gold_balance < $params['amount']) {
+                    throw new \Exception('موجودی طلای شما کافی نیست.');
+                }
+
+                $user->gold_balance -= $params['amount'];
+            }
+
+            $user->save();
+
+            $order = Order::create($params);
 
             $this->matchOrders($order);
 
@@ -40,7 +56,7 @@ readonly class OrderService
                     'message' => 'An error occurred while processing your order',
                     'error' => $e->getMessage(),
                 ],
-                'status' => 500,
+                'status' => 400,
             ];
         }
     }
@@ -50,11 +66,26 @@ readonly class OrderService
         DB::beginTransaction();
 
         try {
+
             $order = Order::findOrFail($orderId);
 
             if ($order->user_id !== $userId) {
                 throw new \Exception('Unauthorized');
             }
+
+            if ($order->status !== 'open') {
+                throw new \Exception('سفارش قابل لغو نیست.');
+            }
+
+            $user = User::find($userId);
+
+            if ($order->type === 'buy') {
+                $user->balance += $order->amount * $order->price;
+            } elseif ($order->type === 'sell') {
+                $user->gold_balance += $order->amount;
+            }
+
+            $user->save();
 
             $order->update(['status' => 'cancelled']);
 
@@ -73,7 +104,7 @@ readonly class OrderService
                     'message' => 'Order cancellation failed:',
                     'error' => $e->getMessage(),
                 ],
-                'status' => 500,
+                'status' => 400,
             ];
         }
     }
@@ -101,6 +132,15 @@ readonly class OrderService
                 'price' => $order->price,
                 'fee' => $fee,
             ]);
+
+            $buyer = User::find($order->type === 'buy' ? $order->user_id : $matchingOrder->user_id);
+            $seller = User::find($order->type === 'sell' ? $order->user_id : $matchingOrder->user_id);
+
+            $buyer->gold_balance += $amount;
+            $seller->balance += ($amount * $order->price) - $fee;
+
+            $buyer->save();
+            $seller->save();
 
             $order->amount -= $amount;
             $matchingOrder->amount -= $amount;
